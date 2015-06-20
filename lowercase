@@ -1,0 +1,397 @@
+#!/usr/bin/env perl
+
+use warnings;
+use strict;
+use sigtrap handler => \&signal_handler, 'normal-signals';
+use Fcntl qw(:flock :seek O_RDONLY);
+use Cwd qw(getcwd);
+use feature 'say';
+
+our $undo_file = '.lowercase_restore';
+our %flag;
+our $op;
+
+
+#######[ Dispatch tables ]#######
+
+my %op = (
+    ''        => sub { Operation::Lowercase->new },
+    'restore' => sub { Operation::Restore->new   },
+);
+
+my %action = (
+    '' => {
+        help => sub { ($op->verb)." all filenames below the current directory" },
+        do   => sub {
+            if (!$flag{'q'}) {
+                my $count = $op->get_count
+                    or print STDERR "Found no filenames to ".($op->verb).".\n"
+                    and exit;
+
+                confirm(ucfirst($op->verb)." ".PL($count, "filename")." under "
+                        .(getcwd =~ s/^$ENV{HOME}/~/r));
+            }
+            
+            $op->rename_files;
+            
+            if (!$flag{'q'}) {
+                say STDERR "--------";
+                say STDERR "-> $_." for $op->report;
+            }
+        }
+    },
+    
+    'check' =>  {
+        help => sub { "Check if ".($op->verb_gerund)." would cause conflicts" },
+        do   => sub {
+            my ($count, $skip) = $op->get_stats;
+            
+            if (!$flag{'q'}) {
+                say STDERR PL($count,"file")." ready to be ".($op->verb_passive)
+                          ." without conflicts.";
+                
+                if (@$skip) {
+                    say STDERR PL(scalar @$skip,"conflict").":";
+                    for (@$skip) {
+                        my ($dir, @files) = @$_;
+                        say STDERR "   ".((shellquote($dir)."/") =~ s/^\.\///r)
+                               . "{".join(",", map {shellquote($_)} @files)."}";
+                    }
+                }
+            }
+            
+            exit (@$skip ? 1 : 0)
+        }
+    }
+);
+
+my %known_flag = (
+    'q' => "Don't ask for confirmation, and only print errors"
+);
+
+
+#######[ Plumbing ]#######
+
+my ($opname, $action);
+for (@ARGV) {
+    if (/^--(\w+)(?:-(\w+))?$/) {
+        if    (exists $op{$1} and exists $action{$2//''}) {
+            die "Conflicting argument '$_'" if defined $opname;
+            $opname = $1; $action = $2
+        }
+        elsif (exists $action{$1}) {
+            die "Conflicting argument '$_'" if defined $action;
+            $action = $1
+        }
+        else { die "Invalid argument '$_'\n" }
+    }
+    elsif (/^-(\w+)$/) {
+        for (split //, $1) {
+            if (exists $known_flag{$_}) { $flag{$_}++ }
+            else { die "Invalid option '-$_'\n" }
+        }
+    }
+    else { die "Invalid argument '$_'\n" }
+}
+
+$op = $op{$opname//''}();
+$action{$action//''}{do}();
+
+END { unlink $undo_file if -z $undo_file; }
+
+exit;
+
+
+#######[ Core functionality ]#######
+
+package Operation::Lowercase {
+    use base 'Operation';
+    
+    sub verb         { "lowercase" }
+    sub verb_past    { "lowercased" }
+    sub verb_passive { "lowercased" }
+    sub verb_gerund  { "lowercasing" }
+    
+    sub get_count {
+        my $self = shift;
+        my $n;
+        main::for_lines("find . -mindepth 1 -printf '%f\\0'",
+                        {pipe => 1, nl => "\0"}, sub {
+            my $name = shift;
+            ++$n if lc $name ne $name;
+        });
+        return $n;
+    }
+    
+    sub rename_files {
+        my $self = shift;
+        my $undo_fh = main::exclusive_open('>>', $undo_file);
+        $self->{killblock} = 1;
+        main::for_lines("find . -depth -mindepth 1 -printf '%h\\0%f\\0\\0'",
+                        {pipe => 1, nl => "\0\0"}, sub {
+            my ($dir, $file) = split "\0", shift;
+            if ($file ne (my $lc = lc $file)) {
+                $self->rename_file("$dir/$file", "$dir/$lc")
+                    and print {$undo_fh} serialize("$dir/$file"), "\n";
+            }
+            return if $self->{killed};
+        });
+        $self->{killblock} = 0;
+        close $undo_fh;
+    }
+    
+    sub get_stats {
+        my $self = shift;
+        my ($n, @skip);
+        my @seen;
+        my $olddepth = 0;
+        main::for_lines("find . -mindepth 1 -printf '%d\\0%h\\0%f\\0\\0'",
+                        {pipe => 1, nl => "\0\0"}, sub {
+            my ($depth, $dir, $file) = split "\0", shift;
+            
+            my $lc = lc $file;
+            if ($depth < $olddepth) { splice @seen, $depth + 1 }
+            
+            if (exists $seen[$depth]{$lc}) {
+                my $other = \$seen[$depth]{$lc};
+                if (length $$other) {
+                    push @skip, [$dir, $$other];
+                    $n-- if $other eq lc $other;
+                    $$other = '';
+                }
+                $n-- if $file eq $lc;
+                push @{$skip[-1]}, $file;
+            }
+            else {
+                $seen[$depth]{$lc} = $file;
+                $n++ if $file ne $lc;
+            }
+            $olddepth = $depth;
+        });
+        return $n, \@skip;
+    }
+    
+    sub serialize {
+        shift =~ s/([\\\t\n])/"\\" . $1 =~ tr|\t\n|tn|r/ger
+    }
+}
+
+package Operation::Restore {
+    use base 'Operation';
+    
+    sub verb         { "restore" }
+    sub verb_past    { "restored" }
+    sub verb_passive { "restored" }
+    sub verb_gerund  { "restoring" }
+    
+    sub get_count {
+        my $self = shift;
+        return 0 if !-e $undo_file;
+        my $n;
+        main::for_lines($undo_file, sub { ++$n });
+        return $n;
+    }
+    
+    sub rename_files {
+        my $self = shift;
+        return if !-e $undo_file;
+        
+        my $undo_tmp = $undo_file.int(1e6*rand);
+        my $undo_tmp_fh = main::exclusive_open('>', $undo_tmp);
+        
+        $self->{killblock} = 1;
+        main::for_lines($undo_file, {reverse => 1}, sub {
+            my $serialized = shift;
+            if (!$self->{killed}) {
+                my $path = deserialize($serialized);
+                my ($dir, $file) = ($path =~ m|^((?:[^/]*\/)*)([^/]*)$|);
+                $self->rename_file($dir . lc($file), $path)
+                    or print {$undo_tmp_fh} $serialized, "\n";
+            }
+            else { print {$undo_tmp_fh} $serialized, "\n" }
+        });
+        
+        CLEANUP:
+        close $undo_tmp_fh;
+        my $undo_fh = main::exclusive_open('>', "$undo_file");
+        main::for_lines($undo_tmp, {reverse => 1}, sub {
+            print {$undo_fh} shift, "\n";
+        });
+        unlink $undo_tmp;
+        $self->{killblock} = 0;
+    }
+    
+    sub get_stats {
+        my $self = shift;
+        return 0, [] if !-e $undo_file;
+        my ($n, @skip);
+        main::for_lines($undo_file, sub {
+            my $path = deserialize(shift);
+            if (-e $path) {
+                my ($dir, $file) = $path =~ m|^((?:[^/]*\/)*)([^/]*)$|;
+                chop $dir;
+                push @skip, [$dir, lc($file), $file]
+            }
+            else { $n++ }
+        });
+        return ($n//0), [reverse @skip];
+    }
+    
+    sub deserialize {
+        shift =~ s/\\(.)/$1 =~ tr|tn|\t\n|r/ger
+    }
+}
+
+package Operation {
+    
+    sub new {
+        my $class = shift;
+        return bless {}, $class;
+    }
+    
+    sub skip {
+        my ($self, $file, $reason, $details) = @_;
+        say STDERR "Skipping ".main::shellquote($file)
+                  ." because $reason (".main::shellquote($details).")";
+        $self->{skipped}{$reason}++;
+    }
+    
+    sub rename_file {
+        my ($self, $old, $new) = @_;
+        if (-e $new) {
+            $self->skip($old, "the target already exists", $new);
+        }
+        elsif (!-e $old) {
+            $self->skip($old, "it no longer exists", $new);
+        }
+        elsif (!rename $old, $new) {
+            $self->skip($old, "the renaming attempt failed", $!);
+        }
+        else {
+            ++$self->{renamed}; return 1
+        }
+        return undef
+    }
+    
+    sub kill {
+        my $self = shift;
+        exit 1 if !$self->{killblock};
+        $self->{killed} = 1;
+    }
+    
+    sub report {
+        my $self = shift;
+        ucfirst($self->verb_past)." ".main::PL($self->{renamed}//0, "filename"),        
+        map { "Skipped ".main::PL($self->{skipped}{$_}//0, "file")." because $_" }
+            sort keys %{$self->{skipped}};
+    }
+}
+
+my %file_action = (
+
+);
+
+
+#######[ Helper functions ]#######
+
+#| Call the given callback for each line of a file or pipe.
+#|    for_lines("foo.txt", sub { ... })
+#|    for_lines("foo.txt", {reverse => 1}, sub { ... })
+#|    for_lines("find -print0", {pipe =>1, nl => "\0"}, sub { ... })
+sub for_lines {
+    my $file = shift;
+    my %arg = %{shift()} if ref $_[0] eq 'HASH';
+    my $callback = shift;
+    
+    local $/ = $arg{nl} if defined $arg{nl};
+    my $fh;
+    
+    # read lines from pipe
+    if ($arg{pipe}) {
+        open $fh, "$file |"
+            or die "Could not run '".($file =~ /\w+/)."': $!.\n";
+        while (<$fh>) { chomp; $callback->($_) }
+    }
+    
+    # read lines from file (last to first)
+    elsif ($arg{reverse}) {
+        my $blocksize = 1024;
+        
+        $fh = exclusive_open('<', $file);
+        
+        my ($pos, $buffer, $leftover) = (0, '');
+        $pos = sysseek $fh, 0, SEEK_END;
+        $pos = sysseek $fh, ($blocksize - $pos % $blocksize), SEEK_END
+            or die "ERROR: Could not seek in file '$file' - $!\n";
+        my $first = 1;
+        
+        while ($pos > 0) {
+            $pos = sysseek $fh, $pos - $blocksize, SEEK_SET
+                or die "ERROR: Could not seek in file '$file' - $!\n";
+            sysread($fh, $buffer, $blocksize)
+                // die "ERROR: Could not read from file '$file' - $!\n";
+            
+            $buffer .= ($leftover // '');
+            ($leftover, my @lines) = split $/, $buffer, -1;
+            
+            while (defined (my $line = pop @lines)) {
+                if ($first && !length $line) { $first = 0; next }
+                $callback->($line)
+            }
+        }
+        $callback->($leftover) if defined $leftover;
+    }
+    
+    # read lines from file (first to last)
+    else {
+        $fh = exclusive_open('<', $file);
+        while (<$fh>) { chomp; $callback->($_) }
+    }
+    
+    close $fh;
+}
+
+#| Open a file and lock it
+#|    my $handle = exclusive_open('>', "foo.txt")
+sub exclusive_open {
+    open my($fh), $_[0], @_[1..$#_]
+        or die "ERROR: Could not open file '$_[1]' - $!\n";
+    flock($fh, LOCK_EX|LOCK_NB)
+        or die "ERROR: Could not lock file '$_[1]' - $!\n";
+    return $fh;
+}
+
+#| Ask the user for confirmation for continuing
+sub confirm {
+    my $question = shift;
+    local $| = 1;
+    
+    print STDERR "$question? [Y/n] ";
+    chomp(my $answer = <STDIN>);
+    if ($answer =~ /^[^y]/i) {
+        exit 1;
+    };
+}
+
+#| Print a number followed by a correspondingly pluralized noun
+#|    say "I own ".PL($number_of_cats, 'cat')
+sub PL {
+    my ($n, $noun) = @_;
+    return $n . " " . ($n == 1 ? $noun :
+                       ($noun =~ s/(\w+)/$1s/r =~ s/\bis\b/are/gr));
+}
+
+sub signal_handler {
+    say STDERR "\nAborting...";
+    if (defined $op) { $op->kill }
+    else { exit 1 }
+}
+
+#| Escape a string so that it becomes a valid shell parameter
+#|    "find ".shellquote($dir)." -iname '*.txt'"
+sub shellquote {
+    $_ = shift;
+    s/^\.\///;
+    return "''" if !defined $_ || $_ eq '';
+    return (m#[^\w%+./:@^-]# ? "'".s/'/'\\''/gr."'" : $_)
+}
