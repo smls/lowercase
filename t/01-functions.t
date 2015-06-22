@@ -6,7 +6,7 @@
 
 use warnings;
 use strict;
-use autodie qw(:all);
+use autodie;
 use File::Temp qw(tempfile);
 use Test::More tests => 16;
 
