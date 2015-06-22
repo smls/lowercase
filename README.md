@@ -13,10 +13,11 @@ A tool for lowercasing (and if needed, later restoring) all filenames inside the
 
 ### Installation
 
-1. Make sure that the following two dependencies are installed *(on most Linux systems they already are)*:
-  * `perl` (v5.10 or newer)
-  * `find` (from the [Gnu Find Utilities](http://www.gnu.org/software/findutils/))
-2. Copy the `lowercase` file from this repository to a location in your `$PATH`, and give it executable permissions.
+1. Make sure that these two dependencies are installed *(on most Linux systems they already are)*:
+  * Perl v5.10 or newer
+  * `find` from the [Gnu Find Utilities](http://www.gnu.org/software/findutils/)
+2. Optionally, run the `prove` tool (which is part of Perl) without arguments in the root folder of this repository, to run the tests for making sure `lowercase` works on your system. If there are test failures, don't install `lowercase` and [submit a bug report](https://github.com/smls/lowercase/issues) instead.
+3. Copy the `lowercase` file from this repository to a location in your `$PATH`, and give it executable permissions.
 
 ### Usage
 
