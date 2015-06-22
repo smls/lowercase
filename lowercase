@@ -97,7 +97,7 @@ for (@ARGV) {
 $op = $op{$opname//''}();
 $action{$action//''}{do}();
 
-END { unlink $undo_file if -z $undo_file; }
+END { no warnings; unlink $undo_file if -z $undo_file; }
 
 exit;
 
@@ -372,8 +372,7 @@ sub confirm {
 #|    say "I own ".PL($number_of_cats, 'cat')
 sub PL {
     my ($n, $noun) = @_;
-    return $n . " " . ($n == 1 ? $noun :
-                       ($noun =~ s/(\w+)/$1s/r =~ s/\bis\b/are/gr));
+    return "$n $noun" . ($n == 1 ? '' : 's');
 }
 
 sub signal_handler {
@@ -382,7 +381,7 @@ sub signal_handler {
     else { exit 1 }
 }
 
-#| Escape a string so that it becomes a valid shell parameter
+#| Escape a path so that it becomes a valid shell parameter
 #|    "find ".shellquote($dir)." -iname '*.txt'"
 sub shellquote {
     $_ = shift;
