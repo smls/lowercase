@@ -211,7 +211,6 @@ package Operation::Restore {
             else { print {$undo_tmp_fh} $serialized, "\n" }
         });
         
-        CLEANUP:
         close $undo_tmp_fh;
         my $undo_fh = main::exclusive_open('>', "$undo_file");
         main::for_lines($undo_tmp, {reverse => 1}, sub {
@@ -287,17 +286,13 @@ package Operation {
     }
 }
 
-my %file_action = (
-
-);
-
 
 #######[ Helper functions ]#######
 
 #| Call the given callback for each line of a file or pipe.
 #|    for_lines("foo.txt", sub { ... })
 #|    for_lines("foo.txt", {reverse => 1}, sub { ... })
-#|    for_lines("find -print0", {pipe =>1, nl => "\0"}, sub { ... })
+#|    for_lines("find -print0", {pipe => 1, nl => "\0"}, sub { ... })
 sub for_lines {
     my $file = shift;
     my %arg = %{shift()} if ref $_[0] eq 'HASH';
